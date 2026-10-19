@@ -35,3 +35,4 @@ TOOLS = [
     ToolDefinition('run_todo', 'build and update the todo list', RunTodoInput, run_todo, False),
     ToolDefinition('run_subagent', 'build and run the subagent to finish the task', RunSubAgentInput, run_subagent, True)
 ]
+

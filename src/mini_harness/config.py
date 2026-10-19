@@ -20,7 +20,7 @@ class config:
     rate_base:int=3
     retry_base:int=3
     rate_cap:int=3
-
+    thrash_notice:int=5000
 def build_config() -> config:
 
     # 根据你的目录结构，找到项目根目录
