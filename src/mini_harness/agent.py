@@ -250,17 +250,12 @@ class DeepSeekAgent:
                         #按照tool统计
                         tool_name=tool_call.function.name
                         calls_by_tool[tool_name]=calls_by_tool.get(tool_name,0)+1
-
-
-
                 else:
                     #llm认为不需要调用工具栏了，react范式里一般是任务执行完了
                     print('执行完毕')
                     outcome=OUTCOME.COMPLETED
-                    
                     self.save_memory()
                     break
-                    
             else:
                 #次数用完了
                 print('次数耗尽')
