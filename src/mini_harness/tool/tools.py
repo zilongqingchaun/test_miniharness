@@ -1,35 +1,32 @@
-from ast import pattern
-from calendar import c
 import fnmatch
-from genericpath import isfile
-from hmac import new
-import random
+import glob
 import os
+import re
 import shutil
 import subprocess
-from turtle import st
-from openai import OpenAI
-from pydantic import BaseModel, Field,ConfigDict,field_validator,model_validator
-from typing import Optional, List, Dict, Any
-from pathlib import Path
-import glob
-import re
-from pydantic.type_adapter import P
-from mini_harness.config import CONFIG,config
-from mini_harness.tool.utils import is_denied,render_lines,atomic_write,_split_lines,LINE_NO,strip_line_no,TODO,SUBAGENT,to_api_tool
-from enum import Enum
-import uuid
 import threading
-from mini_harness.tool.box import TOOLS
-import time
-from openai import OpenAI
-from mini_harness.tool.tool_manager import ToolManager
-from mini_harness.agent import retry_call
+import uuid
+from enum import Enum
+from pathlib import Path
+from typing import List, Optional
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from mini_harness.config import config
+from mini_harness.tool.utils import (
+    LINE_NO,
+    SUBAGENT,
+    _split_lines,
+    atomic_write,
+    is_denied,
+    render_lines,
+    strip_line_no,
+)
 # 1. glob_file 
 class GlobFileInput(BaseModel):
     model_config=ConfigDict(extra='forbid')
     pattern: str = Field(..., description="The glob pattern to match files, e.g., '*.py',或者src/*.py,即如果指定路径就检索路径下的py文件，不然递归检索所有py文件")
-    path:Path=Field(Path('.'),description='要检索的文件夹路径')
+    path:Path=Field(default_factory=lambda: Path('.'),description='要检索的文件夹路径')
 
 def glob_file(globfileinput: GlobFileInput,cfg:config)->str:
     pattern=globfileinput.pattern
@@ -142,7 +139,7 @@ def grep_file(grepfileinput: GrepFileInput,cfg:config)->str:
                 for line_index,line in enumerate(f,1):
 
                     if regex.search(line):
-                        hits.append(f'匹配内容：{file_path},{line_index}:{line.rstrip()}')
+                        hits.append(f'[{file_path}]: {line_index}: {line.rstrip()}')
                     if len(hits)>=cfg.max_grep_num:
                         truncated=True
                         break
@@ -164,8 +161,8 @@ def grep_file(grepfileinput: GrepFileInput,cfg:config)->str:
 class ReadFileInput(BaseModel):
     model_config=ConfigDict(extra='forbid')
     path: str = Field(..., description="The path to the file to read")
-    offset: Optional[int] = Field(None, description="Line number to start reading from (1-indexed)")
-    limit: Optional[int] = Field(None, description="Maximum number of lines to read")
+    offset: Optional[int] = Field(None, ge=1, strict=True, description="Line number to start reading from (1-indexed)")
+    limit: Optional[int] = Field(None, ge=1, strict=True, description="Maximum number of lines to read")
 
 def read_file(readfileinput: ReadFileInput,cfg:config)->str:
     #获取文件路径
@@ -183,11 +180,6 @@ def read_file(readfileinput: ReadFileInput,cfg:config)->str:
                 raise PermissionError(f"{path}中包含拒绝访问的目录，拒绝访问")
     if not path.is_file():
         raise FileNotFoundError('这不是一个文件')
-    #判断是全部读取
-    if readfileinput.offset is None and readfileinput.limit is None:
-        size=path.stat().st_size
-        if size >=cfg.max_read_size:
-            raise ValueError(f'文件size:{size},最大size:{cfg.max_read_size}.文件太大超过读取限制')
     body,_=render_lines(file_path=path,offset=readfileinput.offset,limit=readfileinput.limit,cfg=cfg)
     return body
 
@@ -251,6 +243,8 @@ def edit_file(editfileinput: EditFileInput,cfg:config):
     except UnicodeDecodeError:
         raise ValueError(f'{path}非utf-8编码')
 
+    if not editfileinput.old_string:
+        raise ValueError('old_string must not be empty')
     old_string=editfileinput.old_string
     new_string=editfileinput.new_string
 
@@ -269,13 +263,20 @@ def edit_file(editfileinput: EditFileInput,cfg:config):
 
     # chars=content.index(old_string)
     # line_index=content[:chars].count('\n')+1
+    start_line=content.index(old_string)
+    start_line=content[:start_line].count('\n')+1
     old_n=len(_split_lines(old_string))
     new_n=len(_split_lines(new_string))
     hits=content.count(old_string)
     content= content.replace(old_string,new_string) if editfileinput.replace_all else content.replace(old_string,new_string,1)
     total_n=len(_split_lines(content))
     atomic_write(path=path,content=content)
-    return f'已编辑，旧内容{old_n}行，新内容{new_n}，一共{total_n}行'
+    head=f'已编辑，旧内容{old_n}行，新内容{new_n}，一共{total_n}行'
+    shown=_split_lines(new_string)[:cfg.diff_echo_lines]
+    body='\n'.join(f'{start_line+index:>6}\t{line}' for index,line in enumerate(shown))
+    if new_n>cfg.diff_echo_lines:
+        body += f'\n[只显示新内容的前 {cfg.diff_echo_lines} 行]'
+    return head+'\n'+body
 
    
 
@@ -285,26 +286,12 @@ class RunBashInput(BaseModel):
     command: str = Field(..., description="The bash command to execute on the host terminal")
     
 def run_bash(runbashinput: RunBashInput,cfg:config):
-    try:
-        result=subprocess.run(runbashinput.command,
-            shell = True,
-            capture_output=True,
-            text=True,
-            timeout = cfg.bash_timeout,
-            env = cfg.bash_env,
-            cwd = cfg.work_space
-                              )
-    except subprocess.TimeoutExpired as e:
-        raise TimeoutError(f'[timeout]:终端运行超时，{e}')
-    part=[]
-    if result.stdout:
-        part.append(f'[stdout]:{result.stdout}')
-    if result.stderr:
-        part.append(f'[stderr]:{result.stderr}')
-    if result.returncode!=0:
-        part.append(f'exit code:{result.returncode}')
-    content='\n'.join(part) if part else 'no result'
-    return content
+    from mini_harness.process import run_command
+    code, output = run_command(runbashinput.command, cfg.work_space,
+                               cfg.remaining(cfg.bash_timeout), cfg.bash_env, cfg.bash_limit)
+    if code:
+        raise RuntimeError(f'exit code: {code}\n{output}')
+    return output or 'no result'
 
 # 7. run_sandbox
 class RunSandboxInput(BaseModel):
@@ -321,9 +308,10 @@ def run_sandbox(runsandboxinput: RunSandboxInput,cfg:config):
         raise RuntimeError('run_sandbox need Docker,请安装docker')
     root=cfg.work_space.resolve()
     workspace=cfg.sand_box
-    if workspace.is_symlink() or not workspace.resolve().is_relative_to(root)
+    if workspace.is_symlink() or not workspace.resolve().is_relative_to(root):
         raise PermissionError(f'{workspace}必须是{root}下的真实路径')
     workspace = workspace.resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
     if ',' in str(workspace):
         raise ValueError('Docker sandbox paths cannot contain commas')
 
@@ -342,7 +330,7 @@ def run_sandbox(runsandboxinput: RunSandboxInput,cfg:config):
             '--label', 'mini-harness.sandbox=true', '--network=none', '--read-only',
             '--cap-drop=ALL', '--security-opt=no-new-privileges', '--pids-limit=64',
             '--memory=256m', '--memory-swap=256m', '--cpus=1', '--log-driver=none',
-            '--ulimit', 'fsize=16777216:16777216', '--user', f'{os.getuid()}:{os.getgid()}',
+            '--ulimit', 'fsize=16777216:16777216', '--user', (f'{os.getuid()}:{os.getgid()}' if hasattr(os, 'getuid') else '1000:1000'),
             '--tmpfs', '/tmp:rw,nosuid,nodev,size=64m,mode=1777',
             '--mount', f'type=bind,src={workspace},dst=/workspace', '--workdir', '/workspace',
             '--env', 'HOME=/tmp', '--env', 'PYTHONDONTWRITEBYTECODE=1',
@@ -364,7 +352,7 @@ def run_sandbox(runsandboxinput: RunSandboxInput,cfg:config):
     reader = threading.Thread(target=drain, args=(process.stdout,), daemon=True)
     reader.start()
     try:
-        process.wait(timeout=runsandboxinput.timeout_seconds + 10)
+        process.wait(timeout=cfg.remaining(runsandboxinput.timeout_seconds + 10))
     except subprocess.TimeoutExpired as error:
         raise TimeoutError('Docker sandbox startup or execution timed out') from error
     finally:
@@ -412,7 +400,8 @@ class RunTodoInput(BaseModel):
         return self
     
 def run_todo(runtodoinput: RunTodoInput,cfg:config):
-    return TODO.update(runtodoinput.todos)
+    from mini_harness.tool.utils import TodoManger
+    return TodoManger().update(runtodoinput.todos)
     
 
 
@@ -427,64 +416,18 @@ class RunSubAgentInput(BaseModel):
     task_description: str = Field(..., description="A detailed description of the task the subagent needs to accomplish")
     prompt:str=Field(..., description="发给subagent的提示词。")
     agent_type:AgentType=Field(description = 'the agent type which you want use, including explore_agent(explore, read and find the file and file content based on the task), coding_agent (create, code and program the file based on the task) and planning_agent (read, analyze and make a plan to better finish the task)')
-def run_subagent(runsubagentinput: RunSubAgentInput,cfg:config):
-    full_tool_list = to_api_tool(TOOLS)
-    config = SUBAGENT.agent_table.get(runsubagentinput.agent_type.value)
-    if config is None:
-        raise ValueError(f'[invalid subagent]: invalid subagent {runsubagentinput.agent_type.value}')
-    tool_list = [t for t in full_tool_list if t['function']['name'] in config['tools']]
-    regis = {t.name: t for t in TOOLS if t.name in config['tools']}
-    tool_count = 0
-    sub_message = [
-        {
-            'role': 'system',
-            'content': f'''
-You are my subagent-{runsubagentinput.agent_type.value}, your responsibility is to {config['description']}
-{config['prompt']}
-completed the task by giving the summary and analyzing report
-'''
-        },
-        {
-            'role': 'user',
-            'content': runsubagentinput.prompt
-        }
-    ]
-    start = time.time()
-    print(f'[{runsubagentinput.agent_type.value}]: {runsubagentinput.task_description}')
-    client = OpenAI(
-        api_key = cfg.model_api_key,
-        base_url = cfg.base_url,
-        max_retries = 0
-    )
-    executer = ToolManager(regis,cfg = cfg)
-    for turn in range(cfg.max_turn):
-        response = retry_call(lambda: client.chat.completions.create(
-            **cfg.request_options(sub=True),
-            messages = cfg.request_messages(sub_message),
-            tools = tool_list,
-            stream = False
-        ), cfg = cfg)
-        message = response.choices[0].message
-        if message.tool_calls:
-            d = message.model_dump(exclude_none = True)
-            sub_message.append(d)
-            for tool_call in message.tool_calls:
-                res = executer.execute_tool(tool_call)
-                
-                if len(res.content) < cfg.clip_limit:
-                    content=res.content
-                else:
-                    content=res.content[:cfg.clip_limit] + f'\n.....clipped at {cfg.clip_limit} of {len(res.content)} chars'
-                tool_count += 1
-                sub_message.append(
-                    {'role': 'tool', 'tool_call_id': tool_call.id, 'content': content}
-                )
-        else:
-            sub_message.append(
-                message.model_dump(exclude_none=True)
-            )
-            end = time.time() -start
-            print(f'[{runsubagentinput.agent_type.value}]: {runsubagentinput.task_description} -- {tool_count} tools -- {end:.1f}s')
-            return message.content
-    else:
-        return f'[agent done]: the agent run out of the turns for the actions, the task is incompleted'
+def run_subagent(runsubagentinput: RunSubAgentInput, cfg: config):
+    from dataclasses import replace, asdict
+    from mini_harness.agent import DeepSeekAgent
+    from mini_harness.tool.box import TOOLS
+    profile = SUBAGENT.agent_table[runsubagentinput.agent_type.value]
+    child_cfg = replace(cfg, run_id='', user_name='subagent-' + uuid.uuid4().hex, child_results=[])
+    agent = DeepSeekAgent([t for t in TOOLS if t.name in profile['tools']], child_cfg)
+    agent.system_prompt[0]['content'] += '\n' + profile['prompt']
+    result = agent.run_task(runsubagentinput.prompt)
+    cfg.child_results.append(asdict(result))
+    if result.outcome == 'timeout':
+        raise TimeoutError(result.err)
+    if result.outcome != 'completed':
+        raise RuntimeError(f'Subagent {result.outcome}: {result.err}')
+    return agent.messages[-1].get('content') or 'Completed without text'

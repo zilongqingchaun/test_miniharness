@@ -1,0 +1,16 @@
+[
+  {
+    "id": "add",
+    "task": "Fix add.py so add(a, b) returns their sum.",
+    "files": {
+      "add.py": "def add(a, b):\n    return a - b\n"
+    },
+    "verify": "import runpy\nf = runpy.run_path('add.py')['add']\nassert f(2, 3) == 5\nassert f(-2, 2) == 0\n"
+  },
+  {
+    "id": "create",
+    "task": "Create answer.txt containing exactly 42 followed by a newline.",
+    "files": {},
+    "verify": "from pathlib import Path\nassert Path('answer.txt').read_text() == '42\\n'\n"
+  }
+]

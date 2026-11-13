@@ -4,14 +4,12 @@ from logging import ERROR
 import re
 
 from pathlib import Path
-from tkinter import E, EXCEPTION
 from mini_harness.tool.tag import TAG
 from pydantic import ValidationError
-from mini_harness.tool.tools import write_file, edit_file
-from mini_harness.tool.utils import digest, render_lines
+from mini_harness.tool.utils import digest, render_lines, is_denied
 from mini_harness.config import CONFIG
 
-# write_tools=[write_file,edit_file]
+
 write_tools = ['write_file', 'edit_file']
 
 
@@ -36,20 +34,21 @@ class Level:
     FULL: str = 'full'
 
 
-# 实现mark、fresh函数、gate和record，分别实现更新record状态，
-# 检查文件是否被外界文件修改，gate判断是否应该修改文件的逻辑，
-# 最后execute_tool里面负责调用上面几个函数
-# 负责管理工具,暂时不实现其他安全性逻辑判断和具体工具实现
+
 class ToolManager:
     def __init__(self, registry: dict, cfg=CONFIG):
         self.registry = registry
         self.files = {}
-        self.last_tool = {}
+        self.last_tool = None
         self.cfg = cfg
+
+    def resolve(self, path):
+        p = Path(path)
+        return (p if p.is_absolute() else self.cfg.work_space / p).resolve()
 
     # 更新文件状态
     def mark(self, file_path: str, level: str):
-        p = Path(file_path).resolve()
+        p = self.resolve(file_path)
 
         try:
             mtime = p.stat().st_mtime
@@ -60,7 +59,7 @@ class ToolManager:
         old = self.files.get(p)
 
         if level == Level.FULL or (
-            old is not None and old.level == Level.FULL
+            old is not None and old.level == Level.FULL and old.hash == hash_value
         ):
             level = Level.FULL
         else:
@@ -77,57 +76,44 @@ class ToolManager:
 
     def fresh(self, file_path: Path | str):
         # 没有变化返回True
-        p = Path(file_path).resolve()
+        p = self.resolve(file_path)
 
         if p.is_file():
             file = self.files.get(p)
             if file is not None:
-                if file.mtime == p.stat().st_mtime:
-                    return True
                 if file.hash == digest(p):
                     return True
 
         return False
 
     def deny(self, file_path, msg: str, tag):
-        try:
-            body, reach_end = render_lines(
-                Path(file_path), None, None
-            )
-            self.mark(
-                file_path=file_path,
-                level=Level.FULL if reach_end else Level.PARTIAL
-            )
-            return ToolItem(
-                f'[{tag}]: {msg}\n\nCurrent content of {file_path}:\n{body}',
-                False,
-                tag
-            )
-        except Exception as e:
-            return ToolItem(
-                f'[{tag}]: {msg}\n\n'
-                f'[Counld not display the file: {type(e).__name__}. '
-                f'Read it with read_file before before retrying]',
-                False,
-                tag
-            )
 
-    # 传入需要args需要传回需要读取的文件
+        try:
+            body, reach_end = render_lines(Path(file_path), None, None, self.cfg)
+            self.mark(file_path, Level.FULL if reach_end else Level.PARTIAL)
+            return ToolItem(
+                content=f'[{tag}]: {msg}\n\nCurrent content of {file_path}:\n{body}',
+                ok=False,
+                tag=tag
+            )
+        except Exception:
+            return ToolItem(f'[{tag}]: {msg}; read_file explicitly before retrying', False, tag)
+
+
     def gate(self, func_name: str, params) -> ToolItem | None:
-        # 需要传入函数名，才能判断需要调用的函数是读还是写
-        # 之前是否读取过
+
+
         if func_name not in write_tools:
             return None
 
-        file_path = Path(params.path).resolve()
+        file_path = self.resolve(params.path)
         exists = file_path.is_file()
 
-        # 文件不存在时，交给具体工具函数处理
+
         if not exists:
             return None
 
-        # edit需要判断文件是否被更改过，以及是否被读取过
-        # write需要判断是否允许重置，是否完整读取过，以及是否被更改过
+
         if func_name == 'edit_file':
             if file_path not in self.files:
                 return self.deny(
@@ -173,7 +159,7 @@ class ToolManager:
         if func == 'read_file':
             self.mark(
                 file_path=args.path,
-                level=Level.PARTIAL if '[Showing lines ' in content else Level.FULL
+                level=Level.PARTIAL if ('[Showing lines ' in content or 'Content not displayed' in content or '[truncated' in content) else Level.FULL
             )
 
         elif func == 'grep_file':
@@ -183,7 +169,7 @@ class ToolManager:
                 self.mark(hit, Level.PARTIAL)
 
         elif func in write_tools:
-            file_path = Path(args.path).resolve()
+            file_path = self.resolve(args.path)
 
             old = self.files.get(file_path)
             edits = old.edits if old else 0
@@ -210,9 +196,9 @@ class ToolManager:
         name = tool_call.function.name
         definition = self.registry.get(name)
 
-        # 得到ToolDefinition对象
-        # 未知工具
+
         if definition is None:
+            self.last_tool = None
             return ToolItem(
                 content=f'unknown tool: {name}',
                 ok=False,
@@ -223,22 +209,55 @@ class ToolManager:
             args = json.loads(tool_call.function.arguments or '{}')
             params = definition.parameters(**args)
         except (json.JSONDecodeError, ValidationError, TypeError) as e:
-            # 参数非法
+
+            self.last_tool = None
             return ToolItem(
                 content=f'{type(e).__name__}:{e}',
                 ok=False,
                 tag=TAG.INVALID_ARGS
             )
 
-        # 通过gate才能判断是否执行后续程序
-        # 返回None则不管，能否执行由后续判断，返回其他则直接返回
-        gate_result = self.gate(name, params)
+        current = (name, json.dumps(args, ensure_ascii=False, sort_keys=True))
+        if self.last_tool == current:
+            return ToolItem(
+                content=f'[{TAG.DEDUP}]: identical tool call repeated; change the tool or the arguments',
+                ok=False,
+                tag=TAG.DEDUP
+            )
+        self.last_tool = None
+
+        try:
+            self.cfg.remaining()
+            if hasattr(params, 'path'):
+                path = self.resolve(params.path)
+                guard = self.cfg.guard_write if name in write_tools else self.cfg.guard_read
+                root = self.cfg.sand_box if name in write_tools else self.cfg.work_space
+                if guard and (not path.is_relative_to(root) or is_denied(path, self.cfg)):
+                    raise PermissionError('Path denied')
+                params.path = str(path) if isinstance(params.path, str) else path
+            if definition.risky:
+                allowed = self.cfg.risky_policy == 'allow'
+                if self.cfg.risky_policy == 'ask' and callable(self.cfg.approval):
+                    allowed = self.cfg.approval(name, args)
+                if not allowed:
+                    raise PermissionError('Risky tool requires explicit approval')
+            gate_result = self.gate(name, params)
+        except PermissionError as e:
+            return ToolItem(str(e), False, TAG.DENIED)
 
         if gate_result is not None:
             return gate_result
 
         try:
             result = definition.function(params,self.cfg)
+        except TimeoutError as e:
+
+            self.cfg.remaining()
+            return ToolItem(
+                content=f'[{TAG.EXECUTE_FAILED}]: {e}',
+                ok=False,
+                tag=TAG.EXECUTE_FAILED
+            )
         except Exception as e:
             return ToolItem(
                 content=f'{type(e).__name__}:{e}',
@@ -250,6 +269,9 @@ class ToolManager:
             result, ensure_ascii=False
         )
 
+        if len(raw) > self.cfg.clip_limit:
+            raw = raw[:self.cfg.clip_limit] + '\n[truncated output]'
         raw = self.Record(name, args=params, content=raw)
+        self.last_tool = current
 
         return ToolItem(content=raw, ok=True, tag=TAG.SUCCESS)

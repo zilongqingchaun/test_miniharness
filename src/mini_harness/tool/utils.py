@@ -1,6 +1,5 @@
 from pathlib import Path
 import hashlib
-from types import _ReturnT_co
 from mini_harness.config import CONFIG,config
 import fnmatch
 import os
@@ -19,7 +18,7 @@ def render_lines(file_path: Path, offset: int|None, limit: int|None, cfg = CONFI
         content = file_path.read_text(encoding = 'utf-8')
     except UnicodeDecodeError:
         size = file_path.stat().st_size
-        return f'[Binary or non-UTF-8 file, {size} bytes. Content not displayed]', True
+        return f'[Binary or non-UTF-8 file, {size} bytes. Content not displayed]', False
     lines = _split_lines(content)
     total = len(lines)
     if total == 0:
@@ -41,9 +40,9 @@ def render_lines(file_path: Path, offset: int|None, limit: int|None, cfg = CONFI
 
     last = start + len(out)
     body = '\n'.join(out)
-    reach_end = (last >= total)
+    reach_end = (start == 0 and last >= total)
     if not reach_end:
-        body += f'\n\n{start+1}-{last} of {total}, use offset {last + 1} to continue]'
+        body += f'\n\n[Showing lines {start+1}-{last} of {total}; read from line 1 through EOF for full coverage]'
 
     return body, reach_end
 
@@ -60,7 +59,8 @@ def _split_lines(content: str) -> list[str]:
 
 def atomic_write(path:Path,content:str):
     path.parent.mkdir(parents = True, exist_ok=True)
-    temp=path.with_name(path.name+'.tmp')
+    import uuid
+    temp=path.with_name(path.name+'.'+uuid.uuid4().hex+'.tmp')
     try:
         temp.write_text(content,encoding='utf-8')
         os.replace(temp,path)
@@ -100,11 +100,11 @@ class TodoManger:
         action = []
         for item in self.items:
             if item.status == 'completed':
-                action.append(f'[x] {item.content}')
+                action.append(f'[x] {item.task}')
             elif item.status == 'in_progress':
-                action.append(f'[>] {item.activeForm}')
+                action.append(f'[>] {item.activeform}')
             else:
-                action.append(f'[ ] {item.content}')
+                action.append(f'[ ] {item.task}')
         completed = sum(1 for t in self.items if t.status == 'completed')
         action.append(f'{completed} / {len(self.items)} completed')
         return '\n'.join(action)

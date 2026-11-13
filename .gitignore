@@ -11,3 +11,8 @@ build/
 sandbox/
 session.json
 .local/
+
+.runs/
+/src/mini_harness/history/*.json
+bench-results/
+/verification/

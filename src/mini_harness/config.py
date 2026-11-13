@@ -7,8 +7,8 @@ import os
 import fnmatch
 @dataclass
 class config:
-    max_token:int=5000
-    history_session_path:str= r'D:\code\project\my_agent\test_miniharness\src\mini_harness\history'
+    max_token:int=10000
+    history_session_path: str = '.runs'
     user_name:str='the_user'
     agent_task_mode:bool=True
     base_url: str = "https://api.deepseek.com"
@@ -24,7 +24,7 @@ class config:
     thrash_notice:int=5000
     read_limit:int=50000
     over_write:bool=True
-    work_space=Path.cwd()
+    work_space: Path = field(default_factory=Path.cwd)
     deny_name: tuple = (
             ".env",
             ".env.*",
@@ -44,9 +44,10 @@ class config:
     bash_limit: int = 30000
     max_grep_num:int=100
     clip_limit: int = 80000
+    diff_echo_lines: int = 40
     max_read_size:int=5000
     guard_write:bool=True
-    sand_box:Path=work_space/'sandbox'
+    sand_box: Path | None = None
     bash_timeout: int = 30
 
     bash_env_deny: tuple = (
@@ -58,6 +59,43 @@ class config:
         '*_PWD',
         '*AUTH*'
     )
+
+    risky_policy: str = 'deny'
+    approval: object = field(default=None, repr=False)
+    deadline: float | None = field(default=None, repr=False)
+    context_chars: int = 160000
+    recent_keep: int = 12
+    api_timeout: float = 60
+    preserve_reasoning: bool = True
+    run_id: str = ''
+    child_results: list = field(default_factory=list, repr=False)
+
+    def __post_init__(self):
+        self.work_space = Path(self.work_space).resolve()
+        self.sand_box = Path(self.sand_box).resolve() if self.sand_box else self.work_space / 'sandbox'
+        if self.risky_policy not in {'deny', 'allow', 'ask'}:
+            raise ValueError('Invalid risky_policy')
+        if self.max_run_time < 0 or self.api_timeout <= 0 or self.clip_limit < 1:
+            raise ValueError('Invalid runtime/output limits')
+        if min(self.max_turn, self.max_token, self.max_retry, self.rate_retry) < 1:
+            raise ValueError('Turns, tokens and retries must be positive')
+
+    def remaining(self, cap=None):
+        import time
+        remaining = float('inf') if self.deadline is None else self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('Run budget exhausted')
+        return min(remaining, cap) if cap is not None else remaining
+
+    def request_options(self, sub=False):
+        return dict(model=self.model_name, max_tokens=self.max_token, temperature=0,
+                    timeout=self.remaining(self.api_timeout))
+
+    def request_messages(self, messages):
+        excluded = {'annotations', 'parsed'}
+        if not self.preserve_reasoning:
+            excluded.add('reasoning_content')
+        return [{k: v for k, v in m.items() if k not in excluded} for m in messages]
 
     @property
     def bash_env(self) -> dict:
@@ -82,12 +120,12 @@ def build_config() -> config:
 
     # 从环境变量中读取配置
     cfg = config(
-        model_api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+        model_api_key=os.getenv("MINI_HARNESS_API_KEY") or os.getenv("DEEPSEEK_API_KEY", ""),
+        base_url=os.getenv("MINI_HARNESS_BASE_URL", "https://api.deepseek.com"),
+        preserve_reasoning=os.getenv("MINI_HARNESS_PROVIDER", "deepseek") == "deepseek",
         model_name=os.getenv("MINI_HARNESS_MODEL", "deepseek-v4-flash")
     )
 
-    if not cfg.model_api_key:
-        raise ValueError("未配置 DEEPSEEK_API_KEY")
 
     return cfg
 
