@@ -81,7 +81,7 @@ python -m bench.sb_cli submit --predictions bench-results/swe-smoke/predictions.
 
 评测分为补丁生成和本地判分两步。生成阶段保存 Git 补丁和运行遥测，判分阶段在独立任务容器中应用已有补丁并执行测试。判分可以单独重跑，复用补丁即可，无需再次调用模型。
 
-本轮实验在固定的 30 题子集上成功导出 29 份预测，本地判分通过 28 题。按完整题单计算，观察到的通过比例为 **28/30（93.3%）**。这是一轮允许联网的子集实验结果。完整题单、统计口径和失败类别见 [评测结果](docs/benchmark_results.md)。
+本轮实验在固定的 30 题子集上成功导出 29 份预测，本地判分通过 28 题。按完整题单计算，观察到的通过比例为 **28/30（93.3%）**。这是一轮允许联网的子集实验结果。完整题单、统计口径和失败类别见 [评测结果](bench/benchmark_results.md)。
 
 批量脚本默认从项目目录读取数据。使用 `python -m bench.batch30 status --root <数据目录>` 可以检查已有数据目录中的镜像准备进度。数据目录下需要有 `verification/verified30/manifest.json` 和对应的 `verification/verified30/tasks/`。首次生成题单还需要 `verification/verified-source/` 中的 Verified 任务，以及 `verification/swe-offline-uv/django__django-11099/environment/` 中预先准备好的 Dockerfile、Linux `uv`、`uvx` 和项目依赖配置。结果写到该目录下的 `bench-results/`。
 
